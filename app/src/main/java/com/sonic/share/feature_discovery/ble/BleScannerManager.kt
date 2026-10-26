@@ -20,6 +20,11 @@ interface BleScanner {
     fun stopScan()
 }
 
+data class ScanFilterSpec(
+    val serviceDataUuid: java.util.UUID,
+    val serviceData: ByteArray? = null
+)
+
 class BleScannerManager(
     private val bluetoothAdapter: BluetoothAdapter? = try {
         BluetoothAdapter.getDefaultAdapter()
@@ -30,6 +35,20 @@ class BleScannerManager(
 
     companion object {
         private const val TAG = "BleScannerManager"
+
+        fun getScanFilterSpec(uuid: java.util.UUID = BleAdvertiserManager.SONIC_SERVICE_UUID): ScanFilterSpec {
+            return ScanFilterSpec(serviceDataUuid = uuid, serviceData = null)
+        }
+
+        fun createScanFilter(pUuid: ParcelUuid = ParcelUuid(BleAdvertiserManager.SONIC_SERVICE_UUID)): ScanFilter? {
+            return try {
+                ScanFilter.Builder()
+                    .setServiceData(pUuid, null)
+                    .build()
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 
     override var isScanning: Boolean = false
@@ -82,9 +101,8 @@ class BleScannerManager(
         }
 
         val pUuid = ParcelUuid(BleAdvertiserManager.SONIC_SERVICE_UUID)
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(pUuid)
-            .build()
+        val filter = createScanFilter(pUuid)
+        val filters = if (filter != null) listOf(filter) else emptyList()
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -109,7 +127,7 @@ class BleScannerManager(
 
         activeCallback = callback
         try {
-            scanner.startScan(listOf(filter), settings, callback)
+            scanner.startScan(filters, settings, callback)
             isScanning = true
             safeLogD(TAG, "BLE scanning started successfully")
         } catch (e: SecurityException) {

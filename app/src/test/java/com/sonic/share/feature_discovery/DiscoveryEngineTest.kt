@@ -3,8 +3,10 @@ package com.sonic.share.feature_discovery
 import com.sonic.share.domain.model.DiscoveryType
 import com.sonic.share.domain.model.PeerDevice
 import com.sonic.share.feature_discovery.ble.BleAdvertiser
+import com.sonic.share.feature_discovery.ble.BleAdvertiserManager
 import com.sonic.share.feature_discovery.ble.BleBeaconPayload
 import com.sonic.share.feature_discovery.ble.BleScanner
+import com.sonic.share.feature_discovery.ble.BleScannerManager
 import com.sonic.share.feature_discovery.mdns.MdnsManager
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -215,9 +217,14 @@ class DiscoveryEngineTest {
         assertTrue(bleScannerStarted)
         assertTrue(mdnsDiscoveryStarted)
 
-        // 3. Test Self-Discovery Filtering: discovering self-broadcast must be ignored
+        // 3. Test Self-Discovery Filtering: discovering self-broadcast must be ignored (both exact and 8-char BLE prefix)
         val selfPeer = PeerDevice(selfId, "My Phone", "Pixel", "192.168.1.2", 8989, 0, DiscoveryType.MDNS)
         mdnsPeerCallback?.invoke(selfPeer)
+        assertEquals(0, engine.discoveredPeers.first().size)
+
+        // Truncated BLE self-beacon (first 8 chars of "my-device-id" -> "my-devic")
+        val truncatedSelfBlePeer = PeerDevice("my-devic", "My Phone", "Pixel", "", 8989, -40, DiscoveryType.BLE)
+        bleScanCallback?.invoke(truncatedSelfBlePeer)
         assertEquals(0, engine.discoveredPeers.first().size)
 
         // 4. Test Remote Peer Discovery
@@ -238,5 +245,25 @@ class DiscoveryEngineTest {
         assertFalse(engine.isAdvertising)
         assertTrue(bleAdvertiserStopped)
         assertTrue(mdnsAdvertiserStopped)
+    }
+
+    @Test
+    fun testBleScannerScanFilterAndAdvertiserSettingsCreation() {
+        val filterSpec = BleScannerManager.getScanFilterSpec()
+        assertEquals(BleAdvertiserManager.SONIC_SERVICE_UUID, filterSpec.serviceDataUuid)
+        assertNull(filterSpec.serviceData) // Matches any service data for Sonic UUID without restricting payload
+
+        val settingsSpec = BleAdvertiserManager.getAdvertiseSettingsSpec()
+        assertEquals(android.bluetooth.le.AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY, settingsSpec.advertiseMode)
+        assertEquals(android.bluetooth.le.AdvertiseSettings.ADVERTISE_TX_POWER_HIGH, settingsSpec.txPowerLevel)
+        assertFalse(settingsSpec.isConnectable)
+        assertEquals(0, settingsSpec.timeoutMillis)
+
+        // Verify factory builder invocations execute safely without crashing
+        BleScannerManager.createScanFilter()
+        BleAdvertiserManager.createAdvertiseSettings()
+        val pUuid = android.os.ParcelUuid(BleAdvertiserManager.SONIC_SERVICE_UUID)
+        val payload = byteArrayOf(1, 2, 3)
+        BleAdvertiserManager.createAdvertiseData(pUuid, payload)
     }
 }

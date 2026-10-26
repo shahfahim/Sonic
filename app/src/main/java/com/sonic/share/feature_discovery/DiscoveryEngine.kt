@@ -165,14 +165,18 @@ class DefaultDiscoveryEngine(
 
     private var evictionJob: Job? = null
 
+    private fun isSelf(peerId: String): Boolean {
+        return peerId == deviceId || deviceId.startsWith(peerId) || peerId.startsWith(deviceId)
+    }
+
     override fun startDiscovery() {
         if (isDiscovering) return
         isDiscovering = true
 
         bleScanner?.startScan(
             onPeerDiscovered = { peer ->
-                // Filter out self-broadcasts
-                if (peer.id != deviceId) {
+                // Filter out self-broadcasts (handles exact match and 8-char BLE truncation prefix)
+                if (!isSelf(peer.id)) {
                     aggregator.onPeerFound(peer)
                 }
             }
@@ -181,12 +185,12 @@ class DefaultDiscoveryEngine(
         mdnsManager?.startDiscovery(
             onPeerDiscovered = { peer ->
                 // Filter out self-broadcasts
-                if (peer.id != deviceId) {
+                if (!isSelf(peer.id)) {
                     aggregator.onPeerFound(peer)
                 }
             },
             onPeerLost = { id ->
-                if (id != deviceId) {
+                if (!isSelf(id)) {
                     aggregator.onPeerLost(id)
                 }
             }

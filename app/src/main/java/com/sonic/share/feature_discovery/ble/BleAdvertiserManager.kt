@@ -22,6 +22,13 @@ interface BleAdvertiser {
     fun stopAdvertising()
 }
 
+data class AdvertiseSettingsSpec(
+    val advertiseMode: Int = AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY,
+    val txPowerLevel: Int = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
+    val isConnectable: Boolean = false,
+    val timeoutMillis: Int = 0
+)
+
 class BleAdvertiserManager(
     private val bluetoothAdapter: BluetoothAdapter? = try {
         BluetoothAdapter.getDefaultAdapter()
@@ -34,6 +41,40 @@ class BleAdvertiserManager(
         private const val TAG = "BleAdvertiserManager"
         // 16-bit short UUID format: 0000534F-0000-1000-8000-00805F9B34FB ("SO")
         val SONIC_SERVICE_UUID: UUID = UUID.fromString("0000534f-0000-1000-8000-00805f9b34fb")
+
+        fun getAdvertiseSettingsSpec(): AdvertiseSettingsSpec {
+            return AdvertiseSettingsSpec(
+                advertiseMode = AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY,
+                txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
+                isConnectable = false,
+                timeoutMillis = 0
+            )
+        }
+
+        fun createAdvertiseSettings(): AdvertiseSettings? {
+            return try {
+                AdvertiseSettings.Builder()
+                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                    .setConnectable(false)
+                    .setTimeout(0)
+                    .build()
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        fun createAdvertiseData(pUuid: ParcelUuid, payload: ByteArray): AdvertiseData? {
+            return try {
+                AdvertiseData.Builder()
+                    .setIncludeDeviceName(false)
+                    .setIncludeTxPowerLevel(false)
+                    .addServiceData(pUuid, payload)
+                    .build()
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 
     override var isAdvertising: Boolean = false
@@ -89,7 +130,7 @@ class BleAdvertiserManager(
             stopAdvertising()
         }
 
-        val settings = AdvertiseSettings.Builder()
+        val settings = createAdvertiseSettings() ?: AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(false)
@@ -111,7 +152,7 @@ class BleAdvertiserManager(
 
         // Primary advertising packet: ONLY service data (contains UUID + compact payload)
         // Strictly avoid addServiceUuid to stay well below the 31-byte legacy limit
-        val advertiseData = AdvertiseData.Builder()
+        val advertiseData = createAdvertiseData(pUuid, payload) ?: AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
             .addServiceData(pUuid, payload)

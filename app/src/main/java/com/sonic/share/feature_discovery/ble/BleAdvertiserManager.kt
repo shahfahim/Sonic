@@ -32,6 +32,7 @@ class BleAdvertiserManager(
 
     companion object {
         private const val TAG = "BleAdvertiserManager"
+        // 16-bit short UUID format: 0000534F-0000-1000-8000-00805F9B34FB ("SO")
         val SONIC_SERVICE_UUID: UUID = UUID.fromString("0000534f-0000-1000-8000-00805f9b34fb")
     }
 
@@ -49,7 +50,19 @@ class BleAdvertiserManager(
         onError: ((Int) -> Unit)?
     ) {
         val adapter = bluetoothAdapter
-        if (adapter == null || !adapter.isEnabled) {
+
+        val isEnabled = try {
+            adapter?.isEnabled == true
+        } catch (e: SecurityException) {
+            safeLogE(TAG, "SecurityException checking bluetoothAdapter.isEnabled", e)
+            onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
+            return
+        } catch (e: Throwable) {
+            safeLogE(TAG, "Error checking bluetoothAdapter.isEnabled", e)
+            false
+        }
+
+        if (adapter == null || !isEnabled) {
             safeLogW(TAG, "Bluetooth adapter unavailable or disabled")
             onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED)
             return
@@ -57,6 +70,10 @@ class BleAdvertiserManager(
 
         val advertiser: BluetoothLeAdvertiser? = try {
             adapter.bluetoothLeAdvertiser
+        } catch (e: SecurityException) {
+            safeLogE(TAG, "SecurityException acquiring BluetoothLeAdvertiser", e)
+            onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
+            return
         } catch (e: Throwable) {
             safeLogE(TAG, "Could not acquire BluetoothLeAdvertiser", e)
             null
@@ -80,13 +97,29 @@ class BleAdvertiserManager(
             .build()
 
         val pUuid = ParcelUuid(SONIC_SERVICE_UUID)
-        val payload = BleBeaconPayload(deviceId, deviceName, model, port).toByteArray()
+        val shortId = if (deviceId.length > BleBeaconPayload.MAX_ID_BYTES) {
+            deviceId.substring(0, BleBeaconPayload.MAX_ID_BYTES)
+        } else {
+            deviceId
+        }
+        val payload = BleBeaconPayload(
+            deviceId = shortId,
+            deviceName = deviceName,
+            model = model,
+            port = port
+        ).toByteArray()
 
-        val data = AdvertiseData.Builder()
+        // Primary advertising packet: ONLY service data (contains UUID + compact payload)
+        // Strictly avoid addServiceUuid to stay well below the 31-byte legacy limit
+        val advertiseData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
-            .addServiceUuid(pUuid)
             .addServiceData(pUuid, payload)
+            .build()
+
+        // Scan response packet: secondary channel for device name broadcast
+        val scanResponseData = AdvertiseData.Builder()
+            .setIncludeDeviceName(true)
             .build()
 
         val callback = object : AdvertiseCallback() {
@@ -105,7 +138,7 @@ class BleAdvertiserManager(
 
         activeCallback = callback
         try {
-            advertiser.startAdvertising(settings, data, callback)
+            advertiser.startAdvertising(settings, advertiseData, scanResponseData, callback)
         } catch (e: SecurityException) {
             safeLogE(TAG, "Missing BLUETOOTH_ADVERTISE permission", e)
             isAdvertising = false
@@ -127,6 +160,8 @@ class BleAdvertiserManager(
         if (advertiser != null && callback != null) {
             try {
                 advertiser.stopAdvertising(callback)
+            } catch (e: SecurityException) {
+                safeLogW(TAG, "SecurityException stopping BLE advertising", e)
             } catch (e: Throwable) {
                 safeLogW(TAG, "Error stopping BLE advertising", e)
             }

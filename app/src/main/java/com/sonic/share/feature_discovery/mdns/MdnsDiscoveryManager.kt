@@ -6,6 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import com.sonic.share.domain.model.DiscoveryType
 import com.sonic.share.domain.model.PeerDevice
+import java.util.concurrent.ConcurrentHashMap
 
 interface MdnsManager {
     val isAdvertising: Boolean
@@ -50,6 +51,9 @@ class MdnsDiscoveryManager(
 
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+
+    // Cache to map dynamic Nsd serviceName to actual peerId (handles Android mDNS name-conflict renaming)
+    private val serviceNameToPeerId = ConcurrentHashMap<String, String>()
 
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var isResolving = false
@@ -162,8 +166,10 @@ class MdnsDiscoveryManager(
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 safeLogD(TAG, "mDNS service lost: ${serviceInfo.serviceName}")
-                val attrs = serviceInfo.attributes ?: emptyMap()
-                val peerId = attrs["id"]?.let { String(it, Charsets.UTF_8) }
+                // Look up cached peerId first to handle Android name collisions cleanly
+                val cachedId = serviceNameToPeerId.remove(serviceInfo.serviceName)
+                val peerId = cachedId
+                    ?: serviceInfo.attributes?.get("id")?.let { String(it, Charsets.UTF_8) }
                     ?: extractIdFromName(serviceInfo.serviceName)
                 onPeerLost(peerId)
             }
@@ -206,6 +212,7 @@ class MdnsDiscoveryManager(
         }
         discoveryListener = null
         isDiscovering = false
+        serviceNameToPeerId.clear()
         synchronized(resolveQueue) {
             resolveQueue.clear()
             isResolving = false
@@ -262,6 +269,9 @@ class MdnsDiscoveryManager(
                                     ?: extractNameFromName(resolved.serviceName)
                                 val model = attrs["model"]?.let { String(it, Charsets.UTF_8) }
                                     ?: "Android"
+
+                                // Cache serviceName -> peerId mapping for accurate onServiceLost handling
+                                serviceNameToPeerId[resolved.serviceName] = id
 
                                 val peer = PeerDevice(
                                     id = id,

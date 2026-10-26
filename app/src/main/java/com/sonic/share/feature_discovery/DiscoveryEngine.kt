@@ -57,14 +57,28 @@ class PeerAggregator(
                     else -> DiscoveryType.BLE
                 }
 
-                // IP resolution: prefer valid reachable local IP
+                // IP resolution precedence: WIFI_DIRECT IP > MDNS IP > other
+                // Strictly preserve WIFI_DIRECT IP so a local LAN mDNS IP never overwrites direct P2P connection IP
                 val resolvedIp = when {
+                    peer.discoveryType == DiscoveryType.WIFI_DIRECT && isValidIp(peer.ipAddress) -> peer.ipAddress
+                    existing.discoveryType == DiscoveryType.WIFI_DIRECT && isValidIp(existing.ipAddress) -> existing.ipAddress
+                    peer.discoveryType == DiscoveryType.MDNS && isValidIp(peer.ipAddress) -> peer.ipAddress
+                    existing.discoveryType == DiscoveryType.MDNS && isValidIp(existing.ipAddress) -> existing.ipAddress
                     isValidIp(peer.ipAddress) -> peer.ipAddress
                     isValidIp(existing.ipAddress) -> existing.ipAddress
                     else -> peer.ipAddress
                 }
 
-                val resolvedPort = if (peer.port > 0) peer.port else existing.port
+                // Port resolution precedence follows connection type
+                val resolvedPort = when {
+                    peer.discoveryType == DiscoveryType.WIFI_DIRECT && peer.port > 0 -> peer.port
+                    existing.discoveryType == DiscoveryType.WIFI_DIRECT && existing.port > 0 -> existing.port
+                    peer.discoveryType == DiscoveryType.MDNS && peer.port > 0 -> peer.port
+                    existing.discoveryType == DiscoveryType.MDNS && existing.port > 0 -> existing.port
+                    peer.port > 0 -> peer.port
+                    else -> existing.port
+                }
+
                 val resolvedRssi = if (peer.rssi != 0) peer.rssi else existing.rssi
                 val resolvedName = if (peer.name.isNotBlank()) peer.name else existing.name
                 val resolvedModel = if (peer.model.isNotBlank()) peer.model else existing.model
@@ -100,10 +114,17 @@ class PeerAggregator(
         }
     }
 
+    /**
+     * Evicts stale BLE proximity beacons older than peerTimeoutMs.
+     * Peers discovered via mDNS or Wi-Fi Direct are NOT evicted by timer, as their lifecycle
+     * is explicitly governed by network status and onPeerLost.
+     */
     fun evictStalePeers(now: Long = System.currentTimeMillis()): Int {
         synchronized(lock) {
             val staleIds = peerRecords.entries
-                .filter { now - it.value.lastSeen > peerTimeoutMs }
+                .filter { (_, record) ->
+                    record.device.discoveryType == DiscoveryType.BLE && (now - record.lastSeen > peerTimeoutMs)
+                }
                 .map { it.key }
 
             if (staleIds.isNotEmpty()) {
@@ -149,12 +170,26 @@ class DefaultDiscoveryEngine(
         isDiscovering = true
 
         bleScanner?.startScan(
-            onPeerDiscovered = { peer -> aggregator.onPeerFound(peer) }
+            onPeerDiscovered = { peer ->
+                // Filter out self-broadcasts
+                if (peer.id != deviceId) {
+                    aggregator.onPeerFound(peer)
+                }
+            }
         )
 
         mdnsManager?.startDiscovery(
-            onPeerDiscovered = { peer -> aggregator.onPeerFound(peer) },
-            onPeerLost = { id -> aggregator.onPeerLost(id) }
+            onPeerDiscovered = { peer ->
+                // Filter out self-broadcasts
+                if (peer.id != deviceId) {
+                    aggregator.onPeerFound(peer)
+                }
+            },
+            onPeerLost = { id ->
+                if (id != deviceId) {
+                    aggregator.onPeerLost(id)
+                }
+            }
         )
 
         evictionJob = scope.launch {

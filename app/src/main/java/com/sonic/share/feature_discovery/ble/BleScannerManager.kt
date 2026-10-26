@@ -42,7 +42,19 @@ class BleScannerManager(
         onError: ((Int) -> Unit)?
     ) {
         val adapter = bluetoothAdapter
-        if (adapter == null || !adapter.isEnabled) {
+
+        val isEnabled = try {
+            adapter?.isEnabled == true
+        } catch (e: SecurityException) {
+            safeLogE(TAG, "SecurityException checking bluetoothAdapter.isEnabled", e)
+            onError?.invoke(ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED)
+            return
+        } catch (e: Throwable) {
+            safeLogE(TAG, "Error checking bluetoothAdapter.isEnabled", e)
+            false
+        }
+
+        if (adapter == null || !isEnabled) {
             safeLogW(TAG, "Bluetooth adapter unavailable or disabled")
             onError?.invoke(ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED)
             return
@@ -50,6 +62,10 @@ class BleScannerManager(
 
         val scanner: BluetoothLeScanner? = try {
             adapter.bluetoothLeScanner
+        } catch (e: SecurityException) {
+            safeLogE(TAG, "SecurityException acquiring BluetoothLeScanner", e)
+            onError?.invoke(ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED)
+            return
         } catch (e: Throwable) {
             safeLogE(TAG, "Could not acquire BluetoothLeScanner", e)
             null
@@ -117,6 +133,8 @@ class BleScannerManager(
         if (scanner != null && callback != null) {
             try {
                 scanner.stopScan(callback)
+            } catch (e: SecurityException) {
+                safeLogW(TAG, "SecurityException stopping BLE scan", e)
             } catch (e: Throwable) {
                 safeLogW(TAG, "Error stopping BLE scan", e)
             }
@@ -131,9 +149,25 @@ class BleScannerManager(
         val serviceData = record.getServiceData(pUuid) ?: return
         val payload = BleBeaconPayload.parse(serviceData) ?: return
 
+        // Prefer device name from scan record / response if available, then payload, then BT device
+        val deviceName = record.deviceName
+            ?: payload.deviceName.ifBlank {
+                try {
+                    result.device?.name
+                } catch (_: SecurityException) {
+                    null
+                } ?: "Nearby Sonic Device"
+            }
+
+        val deviceAddress = try {
+            result.device?.address ?: "unknown-ble"
+        } catch (_: SecurityException) {
+            "unknown-ble"
+        }
+
         val peer = PeerDevice(
-            id = payload.deviceId.ifBlank { result.device?.address ?: "unknown-ble" },
-            name = payload.deviceName.ifBlank { result.device?.name ?: "Nearby Sonic Device" },
+            id = payload.deviceId.ifBlank { deviceAddress },
+            name = deviceName,
             model = payload.model.ifBlank { "Android" },
             ipAddress = "",
             port = payload.port,

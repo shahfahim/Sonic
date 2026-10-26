@@ -52,6 +52,19 @@ class StorageManager(
     }
 
     /**
+     * Sanitizes a display filename to prevent path traversal vulnerabilities.
+     */
+    fun sanitizeDisplayName(rawName: String): String {
+        val baseName = File(rawName).name
+            .replace("/", "")
+            .replace("\\", "")
+            .replace(Regex("""^\.+"""), "")
+            .trim()
+        val sanitized = baseName.replace(Regex("""[^a-zA-Z0-9._ -]"""), "_")
+        return sanitized.ifBlank { "received_file_${System.currentTimeMillis()}" }
+    }
+
+    /**
      * Commits a completed and verified temporary file to Android Scoped Storage (`MediaStore.Downloads`).
      *
      * On API 29+ (Android 10+):
@@ -75,15 +88,17 @@ class StorageManager(
     ): Uri? {
         if (!tempFile.exists()) return null
 
+        val safeDisplayName = sanitizeDisplayName(displayName)
+
         // 1. Attempt Scoped Storage MediaStore commit (Android 10+ / API 29+)
-        val mediaStoreUri = tryCommitToMediaStoreApi29(tempFile, displayName, mimeType)
+        val mediaStoreUri = tryCommitToMediaStoreApi29(tempFile, safeDisplayName, mimeType)
         if (mediaStoreUri != null) {
             tempFile.delete()
             return mediaStoreUri
         }
 
         // 2. Fallback for legacy Android or unit tests without active MediaStore
-        return tryFallbackCommit(tempFile, displayName)
+        return tryFallbackCommit(tempFile, safeDisplayName)
     }
 
     /**
@@ -108,6 +123,7 @@ class StorageManager(
         displayName: String,
         mimeType: String
     ): Uri? {
+        var insertedUri: Uri? = null
         return try {
             val resolver = context.contentResolver ?: return null
             val downloadDir = try {
@@ -132,6 +148,7 @@ class StorageManager(
             }
 
             val uri = resolver.insert(collection, values) ?: return null
+            insertedUri = uri
 
             val copied = resolver.openOutputStream(uri)?.use { outStream ->
                 FileInputStream(tempFile).use { inStream ->
@@ -154,6 +171,11 @@ class StorageManager(
 
             uri
         } catch (_: Exception) {
+            if (insertedUri != null) {
+                try {
+                    context.contentResolver?.delete(insertedUri, null, null)
+                } catch (_: Exception) {}
+            }
             null
         }
     }
@@ -179,11 +201,19 @@ class StorageManager(
             }
 
             var destFile = File(targetDir, displayName)
+            // Prevent path traversal outside target directory
+            if (!destFile.canonicalPath.startsWith(targetDir.canonicalPath)) {
+                return null
+            }
+
             if (destFile.exists()) {
                 val dotIndex = displayName.lastIndexOf('.')
                 val name = if (dotIndex > 0) displayName.substring(0, dotIndex) else displayName
                 val ext = if (dotIndex > 0) displayName.substring(dotIndex) else ""
                 destFile = File(targetDir, "${name}_${System.currentTimeMillis()}$ext")
+                if (!destFile.canonicalPath.startsWith(targetDir.canonicalPath)) {
+                    return null
+                }
             }
 
             tempFile.copyTo(destFile, overwrite = true)
@@ -194,7 +224,8 @@ class StorageManager(
             } catch (_: Exception) {
                 Uri.parse("file://${destFile.absolutePath}")
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.printStackTrace()
             null
         }
     }

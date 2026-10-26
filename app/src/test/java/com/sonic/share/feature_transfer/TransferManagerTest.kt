@@ -210,4 +210,42 @@ class TransferManagerTest {
         sender.teardown()
         receiver.teardown()
     }
+
+    @Test
+    fun testIntegrityFailureRejectionAndCleanup() = runBlocking {
+        val testPort = 19192
+        val crypto = SonicCryptoEngine()
+
+        val legitimateData = "Legitimate contents before data corruption".toByteArray(Charsets.UTF_8)
+        val wrongSha = crypto.computeSha256("Different unexpected content".toByteArray(Charsets.UTF_8))
+
+        // Manifest declares wrongSha so verification will fail on receiver
+        val payload = TransferPayload("corrupt-1", "corrupt_file.txt", legitimateData.size.toLong(), "text/plain", wrongSha)
+
+        val receiver = TransferManager(
+            localDeviceId = "strict-receiver",
+            localPort = testPort,
+            autoAccept = true
+        )
+        receiver.startServer(testPort)
+
+        val sender = TransferManager(
+            localDeviceId = "sender-corrupt",
+            payloadStreamProvider = { ByteArrayInputStream(legitimateData) }
+        )
+
+        val peer = PeerDevice("strict-receiver", "Receiver", "Pixel", "127.0.0.1", testPort, -50, DiscoveryType.MDNS)
+
+        val states = mutableListOf<TransferState>()
+        sender.sendBatch(peer, listOf(payload)).collect {
+            states.add(it)
+        }
+
+        assertTrue("Transfer must fail due to integrity check failure", states.last() is TransferState.Failed)
+        val reason = (states.last() as TransferState.Failed).reason
+        assertTrue("Reason should mention integrity: $reason", reason.contains("integrity", ignoreCase = true) || reason.contains("corrupt", ignoreCase = true))
+
+        sender.teardown()
+        receiver.teardown()
+    }
 }

@@ -64,6 +64,7 @@ class TransferManager(
 
     private val transferScope = CoroutineScope(SupervisorJob() + dispatcher)
     private val channelMutexes = ConcurrentHashMap<SocketChannel, Mutex>()
+    private val channelFrameQueues = ConcurrentHashMap<SocketChannel, kotlinx.coroutines.channels.Channel<SonicFrame>>()
 
     // Channel states for incoming transfers
     private val channelSecrets = ConcurrentHashMap<SocketChannel, SecretKey>()
@@ -220,6 +221,8 @@ class TransferManager(
             sendFrame(channel, batchComplete)
             emit(TransferState.Completed)
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             emit(TransferState.Failed(e.message ?: "Transfer encountered an error"))
         } finally {
@@ -278,17 +281,38 @@ class TransferManager(
     /**
      * Handles an incoming [SonicFrame] received over a client connection [channel].
      * Public to allow external [SocketChannelServer] instances to delegate events here.
+     *
+     * Inbound frames are dispatched into a per-channel sequential queue to prevent
+     * frame interleaving, counter race conditions, and out-of-order execution.
      */
     fun handleIncomingFrame(frame: SonicFrame, channel: SocketChannel) {
-        transferScope.launch {
-            when (frame) {
-                is HandshakeFrame -> handleHandshake(frame, channel)
-                is ManifestFrame -> handleManifest(frame, channel)
-                is DataChunkFrame -> handleDataChunk(frame, channel)
-                is BatchCompleteFrame -> handleBatchComplete(frame, channel)
-                is DecisionFrame -> { /* Receiver does not expect incoming DecisionFrame */ }
-                is FileAckFrame -> { /* Receiver sends FileAckFrames, does not consume them */ }
+        val queue = channelFrameQueues.computeIfAbsent(channel) { ch ->
+            val q = kotlinx.coroutines.channels.Channel<SonicFrame>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            transferScope.launch {
+                try {
+                    for (f in q) {
+                        processIncomingFrame(f, ch)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                } finally {
+                    channelFrameQueues.remove(ch)
+                }
             }
+            q
+        }
+        queue.trySend(frame)
+    }
+
+    private suspend fun processIncomingFrame(frame: SonicFrame, channel: SocketChannel) {
+        when (frame) {
+            is HandshakeFrame -> handleHandshake(frame, channel)
+            is ManifestFrame -> handleManifest(frame, channel)
+            is DataChunkFrame -> handleDataChunk(frame, channel)
+            is BatchCompleteFrame -> handleBatchComplete(frame, channel)
+            is DecisionFrame -> { /* Receiver does not expect incoming DecisionFrame */ }
+            is FileAckFrame -> { /* Receiver sends FileAckFrames, does not consume them */ }
         }
     }
 
@@ -297,6 +321,8 @@ class TransferManager(
      */
     fun teardown() {
         stopServer()
+        channelFrameQueues.values.forEach { it.close() }
+        channelFrameQueues.clear()
         transferScope.cancel()
         activeIncomingTransfers.values.forEach { it.closeAll() }
         activeIncomingTransfers.clear()
@@ -352,18 +378,30 @@ class TransferManager(
         val active = activeIncomingTransfers[batchId] ?: return
         val payload = active.files.getOrNull(frame.fileIndex) ?: return
 
-        // Decrypt data chunk if secret is established
-        val rawData = if (active.secret != null) {
+        // Decrypt data chunk; Sonic requires end-to-end encryption for all transfers
+        if (active.secret == null) {
+            _incomingSession.value = _incomingSession.value?.copy(
+                state = TransferState.Failed("Unencrypted data chunk rejected for ${payload.name}")
+            )
+            val nack = FileAckFrame(fileIndex = frame.fileIndex, sha256 = "UNENCRYPTED_REJECTED")
+            sendFrame(channel, nack)
+            return
+        }
+
+        val rawData = try {
             cryptoEngine.decrypt(frame.data, active.secret)
-        } else {
-            frame.data
+        } catch (e: Exception) {
+            _incomingSession.value = _incomingSession.value?.copy(
+                state = TransferState.Failed("Decryption failed for chunk in ${payload.name}")
+            )
+            return
         }
 
         // Reassemble chunk into destination .sonic.part file
         val writer = active.getWriter(frame.fileIndex, payload, storageManager, context)
         writer.writeChunk(frame.chunkOffset, rawData)
 
-        // Update progress
+        // Update progress sequentially (guaranteed single thread per channel)
         active.bytesTransferred += rawData.size
         val receivedForFile = (active.fileBytesReceived[frame.fileIndex] ?: 0L) + rawData.size
         active.fileBytesReceived[frame.fileIndex] = receivedForFile
@@ -383,10 +421,22 @@ class TransferManager(
         )
 
         // If file assembly is complete, verify integrity and commit to storage
-        if (receivedForFile >= payload.size) {
+        if (receivedForFile >= payload.size && active.markFileCompleted(frame.fileIndex)) {
             writer.flush()
             val computedSha256 = writer.computeSha256()
-            writer.verifyIntegrity(payload.sha256)
+            val isIntegrityValid = writer.verifyIntegrity(payload.sha256)
+
+            if (!isIntegrityValid) {
+                // Reject corrupted file: do NOT commit to MediaStore, delete partial file
+                writer.close()
+                writer.file.delete()
+                _incomingSession.value = _incomingSession.value?.copy(
+                    state = TransferState.Failed("Integrity verification failed for ${payload.name}")
+                )
+                val nack = FileAckFrame(fileIndex = frame.fileIndex, sha256 = "CORRUPTED_HASH_MISMATCH")
+                sendFrame(channel, nack)
+                return
+            }
 
             // Commit verified temp part to MediaStore
             storageManager?.commitToMediaStore(
@@ -397,7 +447,7 @@ class TransferManager(
 
             writer.close()
 
-            // Send acknowledgment frame
+            // Send acknowledgment frame with computed SHA-256
             val ack = FileAckFrame(fileIndex = frame.fileIndex, sha256 = computedSha256)
             sendFrame(channel, ack)
         }
@@ -487,6 +537,9 @@ class TransferManager(
         var bytesTransferred: Long = 0L
         val writers = ConcurrentHashMap<Int, ChunkedFileWriter>()
         val fileBytesReceived = ConcurrentHashMap<Int, Long>()
+        val completedFiles = ConcurrentHashMap.newKeySet<Int>()
+
+        fun markFileCompleted(fileIndex: Int): Boolean = completedFiles.add(fileIndex)
 
         fun getWriter(
             fileIndex: Int,

@@ -46,7 +46,7 @@ class ChunkedFileWriter(
      * Whether the destination file has reached its expected size.
      */
     val isComplete: Boolean
-        get() = if (expectedSize > 0) file.length() >= expectedSize else file.length() > 0
+        get() = if (expectedSize >= 0) file.length() >= expectedSize else file.length() > 0
 
     /**
      * Writes [data] of length [length] starting at [offset] within the destination file.

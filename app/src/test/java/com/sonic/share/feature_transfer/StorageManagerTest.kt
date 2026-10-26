@@ -77,4 +77,32 @@ class StorageManagerTest {
         assertTrue("Destination file should exist", destFile.exists())
         assertEquals("Complete document content", destFile.readText())
     }
+
+    @Test
+    fun testPathTraversalProtection() {
+        val root = tempFolder.newFolder("storage_traversal_test")
+        val context = FakeContext(root)
+        val manager = StorageManager(context)
+
+        // 1. Verify filename sanitization directly
+        val sanitized = manager.sanitizeDisplayName("../../outside_file.txt")
+        assertEquals("outside_file.txt", sanitized)
+
+        val tempFile = manager.createTempPartFile("malicious")
+        tempFile.writeText("sensitive data")
+
+        manager.commitToMediaStore(tempFile, "../../outside_file.txt")
+
+        // Temp file should be deleted after commit
+        assertFalse(tempFile.exists())
+
+        val targetDir = File(context.getExternalFilesDir("Download"), "Sonic")
+        // File must be saved strictly inside targetDir with sanitized name
+        val destFile = File(targetDir, "outside_file.txt")
+        assertTrue("File should be sanitized and placed within Sonic directory", destFile.exists())
+        assertEquals("sensitive data", destFile.readText())
+
+        val outsideFile = File(root, "outside_file.txt")
+        assertFalse("File must not escape into outer directories", outsideFile.exists())
+    }
 }

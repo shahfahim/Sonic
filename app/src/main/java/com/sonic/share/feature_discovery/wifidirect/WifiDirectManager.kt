@@ -21,6 +21,7 @@ import com.sonic.share.feature_discovery.DiscoveryEngine
 import com.sonic.share.feature_discovery.PeerAggregator
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 interface WifiP2pAdapter {
     fun initialize(onChannelDisconnected: () -> Unit = {})
@@ -61,6 +62,10 @@ open class AndroidWifiP2pAdapter(
     private var channel: WifiP2pManager.Channel? = null
     private var receiver: BroadcastReceiver? = null
     private var isReceiverRegistered: Boolean = false
+
+    private var stateChangedListener: ((Boolean) -> Unit)? = null
+    private var connectionChangedListener: ((Boolean) -> Unit)? = null
+    private var thisDeviceChangedListener: ((String, String) -> Unit)? = null
 
     override fun initialize(onChannelDisconnected: () -> Unit) {
         if (wifiP2pManager != null && context != null && channel == null) {
@@ -274,6 +279,10 @@ open class AndroidWifiP2pAdapter(
         onConnectionChanged: (connected: Boolean) -> Unit,
         onThisDeviceChanged: (deviceName: String, deviceAddress: String) -> Unit
     ) {
+        stateChangedListener = onStateChanged
+        connectionChangedListener = onConnectionChanged
+        thisDeviceChangedListener = onThisDeviceChanged
+
         if (isReceiverRegistered || context == null) return
 
         receiver = object : BroadcastReceiver() {
@@ -281,18 +290,18 @@ open class AndroidWifiP2pAdapter(
                 when (intent?.action) {
                     WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                         val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
-                        onStateChanged(state == WifiP2pManager.WIFI_P2P_STATE_ENABLED)
+                        stateChangedListener?.invoke(state == WifiP2pManager.WIFI_P2P_STATE_ENABLED)
                     }
                     WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                         @Suppress("DEPRECATION")
                         val networkInfo = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
-                        onConnectionChanged(networkInfo?.isConnected == true)
+                        connectionChangedListener?.invoke(networkInfo?.isConnected == true)
                     }
                     WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
                         @Suppress("DEPRECATION")
                         val device = intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
                         if (device != null) {
-                            onThisDeviceChanged(device.deviceName ?: "", device.deviceAddress ?: "")
+                            thisDeviceChangedListener?.invoke(device.deviceName ?: "", device.deviceAddress ?: "")
                         }
                     }
                 }
@@ -327,6 +336,9 @@ open class AndroidWifiP2pAdapter(
             receiver = null
             isReceiverRegistered = false
         }
+        stateChangedListener = null
+        connectionChangedListener = null
+        thisDeviceChangedListener = null
     }
 
     private fun p2pErrorString(reason: Int): String = when (reason) {
@@ -373,6 +385,9 @@ class WifiDirectManager(
     ) {
         stateMachine.transition(P2pEvent.CreatingGroup)
         p2pAdapter.initialize()
+
+        val groupCreatedOnce = AtomicBoolean(false)
+
         p2pAdapter.registerReceiver(
             onStateChanged = { enabled ->
                 if (!enabled && stateMachine.currentState !is P2pState.Disconnected) {
@@ -382,8 +397,14 @@ class WifiDirectManager(
                 }
             },
             onConnectionChanged = { connected ->
-                if (connected && stateMachine.currentState is P2pState.CreatingGroup) {
-                    queryAndPublishGroupInfo(onSuccess)
+                if (connected) {
+                    if (stateMachine.currentState is P2pState.CreatingGroup) {
+                        queryAndPublishGroupInfo(groupCreatedOnce, onSuccess)
+                    }
+                } else {
+                    if (stateMachine.currentState is P2pState.Connected) {
+                        stateMachine.transition(P2pEvent.Disconnected)
+                    }
                 }
             },
             onThisDeviceChanged = { _, _ -> }
@@ -392,29 +413,42 @@ class WifiDirectManager(
         p2pAdapter.createGroup(
             prefer5GHz = prefer5GHz,
             onSuccess = {
-                queryAndPublishGroupInfo(onSuccess)
+                queryAndPublishGroupInfo(groupCreatedOnce, onSuccess)
             },
             onFailure = { _, errorMsg ->
-                stateMachine.transition(P2pEvent.Failure(errorMsg))
-                onFailure?.invoke(errorMsg)
+                if (groupCreatedOnce.compareAndSet(false, true)) {
+                    stateMachine.transition(P2pEvent.Failure(errorMsg))
+                    onFailure?.invoke(errorMsg)
+                }
             }
         )
     }
 
     private fun queryAndPublishGroupInfo(
+        groupCreatedOnce: AtomicBoolean,
         onSuccess: (ssid: String, passphrase: String, ip: String) -> Unit
     ) {
+        if (stateMachine.currentState !is P2pState.CreatingGroup) return
+
         p2pAdapter.requestGroupInfo { ssid, passphrase, _ ->
+            // If group info is not yet populated by wpa_supplicant, do not synthesize credentials.
+            // Wait for WIFI_P2P_CONNECTION_CHANGED_ACTION broadcast to arrive.
+            if (ssid.isNullOrBlank()) {
+                return@requestGroupInfo
+            }
+
             p2pAdapter.requestConnectionInfo { _, groupOwnerAddress ->
+                if (stateMachine.currentState !is P2pState.CreatingGroup) return@requestConnectionInfo
+                if (!groupCreatedOnce.compareAndSet(false, true)) return@requestConnectionInfo
+
                 val ownerIp = groupOwnerAddress?.takeIf { it.isNotBlank() } ?: DEFAULT_P2P_OWNER_IP
-                val resolvedSsid = ssid?.takeIf { it.isNotBlank() } ?: "DIRECT-Sonic-${UUID.randomUUID().toString().take(4)}"
                 val resolvedPassphrase = passphrase ?: ""
 
                 stateMachine.transition(
                     P2pEvent.GroupFormed(
                         isOwner = true,
                         ownerIp = ownerIp,
-                        ssid = resolvedSsid,
+                        ssid = ssid,
                         passphrase = resolvedPassphrase
                     )
                 )
@@ -431,7 +465,7 @@ class WifiDirectManager(
                     )
                 )
 
-                onSuccess(resolvedSsid, resolvedPassphrase, ownerIp)
+                onSuccess(ssid, resolvedPassphrase, ownerIp)
             }
         }
     }
@@ -450,6 +484,9 @@ class WifiDirectManager(
     ) {
         stateMachine.transition(P2pEvent.Connecting(ssid))
         p2pAdapter.initialize()
+
+        val connectionCompletedOnce = AtomicBoolean(false)
+
         p2pAdapter.registerReceiver(
             onStateChanged = { enabled ->
                 if (!enabled && stateMachine.currentState !is P2pState.Disconnected) {
@@ -459,8 +496,14 @@ class WifiDirectManager(
                 }
             },
             onConnectionChanged = { connected ->
-                if (connected && stateMachine.currentState is P2pState.Connecting) {
-                    queryAndPublishConnection(ssid, passphrase, onConnected)
+                if (connected) {
+                    if (stateMachine.currentState is P2pState.Connecting) {
+                        queryAndPublishConnection(connectionCompletedOnce, ssid, passphrase, onConnected)
+                    }
+                } else {
+                    if (stateMachine.currentState is P2pState.Connected) {
+                        stateMachine.transition(P2pEvent.Disconnected)
+                    }
                 }
             },
             onThisDeviceChanged = { _, _ -> }
@@ -470,21 +513,27 @@ class WifiDirectManager(
             ssid = ssid,
             passphrase = passphrase,
             onSuccess = {
-                queryAndPublishConnection(ssid, passphrase, onConnected)
+                queryAndPublishConnection(connectionCompletedOnce, ssid, passphrase, onConnected)
             },
             onFailure = { _, _ ->
                 // Fallback to SoftAP / Wi-Fi Network Specifier connection
-                connectViaWifiSpecifier(ssid, passphrase, onFailure, onConnected)
+                connectViaWifiSpecifier(connectionCompletedOnce, ssid, passphrase, onFailure, onConnected)
             }
         )
     }
 
     private fun queryAndPublishConnection(
+        connectionCompletedOnce: AtomicBoolean,
         ssid: String,
         passphrase: String,
         onConnected: (groupOwnerIp: String) -> Unit
     ) {
+        if (stateMachine.currentState !is P2pState.Connecting) return
+
         p2pAdapter.requestConnectionInfo { isOwner, groupOwnerAddress ->
+            if (stateMachine.currentState !is P2pState.Connecting) return@requestConnectionInfo
+            if (!connectionCompletedOnce.compareAndSet(false, true)) return@requestConnectionInfo
+
             val ownerIp = groupOwnerAddress?.takeIf { it.isNotBlank() } ?: DEFAULT_P2P_OWNER_IP
             stateMachine.transition(
                 P2pEvent.Connected(
@@ -512,6 +561,7 @@ class WifiDirectManager(
     }
 
     private fun connectViaWifiSpecifier(
+        connectionCompletedOnce: AtomicBoolean,
         ssid: String,
         passphrase: String,
         onFailure: ((String) -> Unit)?,
@@ -520,10 +570,22 @@ class WifiDirectManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && context != null) {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             if (cm == null) {
-                val err = "ConnectivityManager not available for SoftAP fallback"
-                stateMachine.transition(P2pEvent.Failure(err))
-                onFailure?.invoke(err)
+                if (connectionCompletedOnce.compareAndSet(false, true)) {
+                    val err = "ConnectivityManager not available for SoftAP fallback"
+                    stateMachine.transition(P2pEvent.Failure(err))
+                    onFailure?.invoke(err)
+                }
                 return
+            }
+
+            // Clean up any existing active NetworkCallback before registering a new one
+            networkCallback?.let { existingCallback ->
+                try {
+                    cm.unregisterNetworkCallback(existingCallback)
+                } catch (e: Exception) {
+                    // Ignore
+                }
+                networkCallback = null
             }
 
             try {
@@ -546,6 +608,7 @@ class WifiDirectManager(
                             // Ignore bind failure if unsupported
                         }
                         val ownerIp = DEFAULT_P2P_OWNER_IP
+                        if (!connectionCompletedOnce.compareAndSet(false, true)) return
                         stateMachine.transition(
                             P2pEvent.Connected(
                                 isOwner = false,
@@ -569,23 +632,29 @@ class WifiDirectManager(
                     }
 
                     override fun onUnavailable() {
-                        val err = "SoftAP connection unavailable or timed out"
-                        stateMachine.transition(P2pEvent.Failure(err))
-                        onFailure?.invoke(err)
+                        if (connectionCompletedOnce.compareAndSet(false, true)) {
+                            val err = "SoftAP connection unavailable or timed out"
+                            stateMachine.transition(P2pEvent.Failure(err))
+                            onFailure?.invoke(err)
+                        }
                     }
                 }
 
                 networkCallback = callback
                 cm.requestNetwork(request, callback)
             } catch (t: Throwable) {
-                val err = "SoftAP connection error: ${t.message}"
+                if (connectionCompletedOnce.compareAndSet(false, true)) {
+                    val err = "SoftAP connection error: ${t.message}"
+                    stateMachine.transition(P2pEvent.Failure(err))
+                    onFailure?.invoke(err)
+                }
+            }
+        } else {
+            if (connectionCompletedOnce.compareAndSet(false, true)) {
+                val err = "SoftAP connect requires Android 10+ with active Context"
                 stateMachine.transition(P2pEvent.Failure(err))
                 onFailure?.invoke(err)
             }
-        } else {
-            val err = "SoftAP connect requires Android 10+ with active Context"
-            stateMachine.transition(P2pEvent.Failure(err))
-            onFailure?.invoke(err)
         }
     }
 

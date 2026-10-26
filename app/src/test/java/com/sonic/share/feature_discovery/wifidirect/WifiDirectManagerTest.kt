@@ -309,4 +309,107 @@ class WifiDirectManagerTest {
         assertEquals("Wi-Fi Direct disabled by system", (manager.currentState as P2pState.Failed).reason)
         assertEquals("Wi-Fi Direct disabled by system", failureReported)
     }
+
+    @Test
+    fun testNoDuplicateCallbacksOnCreateGroup() {
+        val fakeAdapter = FakeWifiP2pAdapter()
+        val manager = WifiDirectManager(p2pAdapter = fakeAdapter)
+
+        var successCount = 0
+        manager.createGroup { _, _, _ ->
+            successCount++
+        }
+
+        // Simulate broadcast firing after createGroup succeeded
+        fakeAdapter.connectionChangedCallback?.invoke(true)
+        fakeAdapter.connectionChangedCallback?.invoke(true)
+
+        assertEquals(1, successCount)
+    }
+
+    @Test
+    fun testNoDuplicateCallbacksOnConnectToGroup() {
+        val fakeAdapter = FakeWifiP2pAdapter().apply {
+            connInfoIsOwner = false
+        }
+        val manager = WifiDirectManager(p2pAdapter = fakeAdapter)
+
+        var connectCount = 0
+        manager.connectToGroup("DIRECT-xyz", "pass") {
+            connectCount++
+        }
+
+        // Simulate broadcast firing after connect succeeded
+        fakeAdapter.connectionChangedCallback?.invoke(true)
+        fakeAdapter.connectionChangedCallback?.invoke(true)
+
+        assertEquals(1, connectCount)
+    }
+
+    @Test
+    fun testRequestGroupInfoEmptyWaitsForConnectionBroadcast() {
+        val fakeAdapter = FakeWifiP2pAdapter().apply {
+            groupInfoSsid = null // Simulate hardware not ready immediately
+        }
+        val manager = WifiDirectManager(p2pAdapter = fakeAdapter)
+
+        var successCalled = false
+        manager.createGroup { _, _, _ ->
+            successCalled = true
+        }
+
+        // Must still be CreatingGroup, NOT prematurely Connected with synthetic credentials
+        assertEquals(P2pState.CreatingGroup, manager.currentState)
+        assertFalse(successCalled)
+
+        // Now hardware finishes setting up group info
+        fakeAdapter.groupInfoSsid = "DIRECT-Hardware-Real"
+        fakeAdapter.connectionChangedCallback?.invoke(true)
+
+        assertTrue(successCalled)
+        assertTrue(manager.currentState is P2pState.Connected)
+        assertEquals("DIRECT-Hardware-Real", (manager.currentState as P2pState.Connected).ssid)
+    }
+
+    @Test
+    fun testDisconnectionBroadcastTransitionsToDisconnected() {
+        val fakeAdapter = FakeWifiP2pAdapter()
+        val manager = WifiDirectManager(p2pAdapter = fakeAdapter)
+
+        manager.createGroup { _, _, _ -> }
+        assertTrue(manager.isConnected)
+
+        // Active connection drops
+        fakeAdapter.connectionChangedCallback?.invoke(false)
+
+        assertEquals(P2pState.Disconnected, manager.currentState)
+        assertFalse(manager.isConnected)
+    }
+
+    @Test
+    fun testReceiverListenersUpdatedOnSubsequentRegisterWithoutTeardown() {
+        val fakeAdapter = FakeWifiP2pAdapter()
+        val manager = WifiDirectManager(p2pAdapter = fakeAdapter)
+
+        var firstFailureCalled = false
+        manager.createGroup(
+            onFailure = { firstFailureCalled = true },
+            onSuccess = { _, _, _ -> }
+        )
+
+        var secondFailureCalled = false
+        // Call connectToGroup without calling teardown() first
+        manager.connectToGroup(
+            ssid = "DIRECT-test",
+            passphrase = "pass",
+            onFailure = { secondFailureCalled = true },
+            onConnected = {}
+        )
+
+        // Trigger failure via state change
+        fakeAdapter.stateChangedCallback?.invoke(false)
+
+        assertFalse(firstFailureCalled)
+        assertTrue(secondFailureCalled)
+    }
 }

@@ -438,14 +438,14 @@ class TransferManager(
                 return
             }
 
+            writer.close()
+
             // Commit verified temp part to MediaStore
             storageManager?.commitToMediaStore(
                 tempFile = writer.file,
                 displayName = payload.name,
                 mimeType = payload.mimeType
             )
-
-            writer.close()
 
             // Send acknowledgment frame with computed SHA-256
             val ack = FileAckFrame(fileIndex = frame.fileIndex, sha256 = computedSha256)

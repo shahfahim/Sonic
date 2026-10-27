@@ -170,36 +170,41 @@ class DefaultDiscoveryEngine(
     }
 
     override fun startDiscovery() {
-        if (isDiscovering) return
+        val wasDiscovering = isDiscovering
         isDiscovering = true
 
-        bleScanner?.startScan(
-            onPeerDiscovered = { peer ->
-                // Filter out self-broadcasts (handles exact match and 8-char BLE truncation prefix)
-                if (!isSelf(peer.id)) {
-                    aggregator.onPeerFound(peer)
+        // Start or retry BLE scanning if not currently scanning (e.g. after permissions granted)
+        if (!wasDiscovering || bleScanner?.isScanning != true) {
+            bleScanner?.startScan(
+                onPeerDiscovered = { peer ->
+                    // Filter out self-broadcasts (handles exact match and 8-char BLE truncation prefix)
+                    if (!isSelf(peer.id)) {
+                        aggregator.onPeerFound(peer)
+                    }
                 }
-            }
-        )
+            )
+        }
 
-        mdnsManager?.startDiscovery(
-            onPeerDiscovered = { peer ->
-                // Filter out self-broadcasts
-                if (!isSelf(peer.id)) {
-                    aggregator.onPeerFound(peer)
+        if (!wasDiscovering) {
+            mdnsManager?.startDiscovery(
+                onPeerDiscovered = { peer ->
+                    // Filter out self-broadcasts
+                    if (!isSelf(peer.id)) {
+                        aggregator.onPeerFound(peer)
+                    }
+                },
+                onPeerLost = { id ->
+                    if (!isSelf(id)) {
+                        aggregator.onPeerLost(id)
+                    }
                 }
-            },
-            onPeerLost = { id ->
-                if (!isSelf(id)) {
-                    aggregator.onPeerLost(id)
-                }
-            }
-        )
+            )
 
-        evictionJob = scope.launch {
-            while (isActive) {
-                delay(5_000L)
-                aggregator.evictStalePeers()
+            evictionJob = scope.launch {
+                while (isActive) {
+                    delay(5_000L)
+                    aggregator.evictStalePeers()
+                }
             }
         }
     }

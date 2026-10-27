@@ -40,11 +40,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -83,7 +84,7 @@ fun RadarScreen(
     viewModel: RadarViewModel,
     onSendFiles: (PeerDevice) -> Unit = {}
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var targetPeerForTransfer by remember { mutableStateOf<PeerDevice?>(null) }
@@ -280,29 +281,31 @@ private fun PolarRadarLayout(
 
         // Radial Peer Nodes ($r, \theta$)
         peers.forEachIndexed { index, peer ->
-            val angle = (-Math.PI / 2) + (2 * Math.PI * index / peers.size.toDouble())
-            val radiusFraction = if (peer.rssi != 0) {
-                ((-peer.rssi - 30) / 60f).coerceIn(0.42f, 0.88f)
-            } else {
-                0.65f
-            }
-            val radius = maxRadarRadius * radiusFraction
-
-            val nodeWidthPx = with(density) { 84.dp.toPx() }
-            val nodeHeightPx = with(density) { 104.dp.toPx() }
-
-            val posX = centerX + radius * cos(angle).toFloat() - (nodeWidthPx / 2f)
-            val posY = centerY + radius * sin(angle).toFloat() - (nodeHeightPx / 2f)
-
-            Box(
-                modifier = Modifier.offset {
-                    IntOffset(posX.roundToInt(), posY.roundToInt())
+            key(peer.id) {
+                val angle = (-Math.PI / 2) + (2 * Math.PI * index / peers.size.toDouble())
+                val radiusFraction = if (peer.rssi != 0) {
+                    ((-peer.rssi - 30) / 60f).coerceIn(0.42f, 0.88f)
+                } else {
+                    0.65f
                 }
-            ) {
-                PeerAvatarNode(
-                    peer = peer,
-                    onClick = { onPeerClick(peer) }
-                )
+                val radius = maxRadarRadius * radiusFraction
+
+                val nodeWidthPx = with(density) { 84.dp.toPx() }
+                val nodeHeightPx = with(density) { 104.dp.toPx() }
+
+                val posX = centerX + radius * cos(angle).toFloat() - (nodeWidthPx / 2f)
+                val posY = centerY + radius * sin(angle).toFloat() - (nodeHeightPx / 2f)
+
+                Box(
+                    modifier = Modifier.offset {
+                        IntOffset(posX.roundToInt(), posY.roundToInt())
+                    }
+                ) {
+                    PeerAvatarNode(
+                        peer = peer,
+                        onClick = { onPeerClick(peer) }
+                    )
+                }
             }
         }
     }

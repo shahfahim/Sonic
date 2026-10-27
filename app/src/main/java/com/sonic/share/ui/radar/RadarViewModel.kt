@@ -33,10 +33,11 @@ data class RadarUiState(
  */
 class RadarViewModel(
     val discoveryEngine: DiscoveryEngine,
-    val transferManager: TransferManager? = null
+    val transferManager: TransferManager? = null,
+    autoStartScanning: Boolean = false
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(RadarUiState(isScanning = true))
+    private val _uiState = MutableStateFlow(RadarUiState(isScanning = autoStartScanning))
     val uiState: StateFlow<RadarUiState> = _uiState.asStateFlow()
 
     private var activeTransferJob: Job? = null
@@ -44,7 +45,9 @@ class RadarViewModel(
     private var incomingSessionJob: Job? = null
 
     init {
-        startScanning()
+        if (autoStartScanning) {
+            startScanning()
+        }
         observeDiscoveredPeers()
         observeIncomingTransfers()
     }

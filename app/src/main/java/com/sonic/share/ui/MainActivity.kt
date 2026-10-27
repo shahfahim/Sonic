@@ -4,7 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.content.Context
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,40 +66,38 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             SonicTheme {
-                var permissionsGranted by remember {
-                    mutableStateOf(
-                        permissionsToRequest.all {
-                            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+                val viewModel: RadarViewModel = viewModel(
+                    factory = object : ViewModelProvider.Factory {
+                        @Suppress("UNCHECKED_CAST")
+                        override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                            return RadarViewModel(
+                                discoveryEngine = engine,
+                                transferManager = transfer,
+                                autoStartScanning = false
+                            ) as T
                         }
-                    )
-                }
+                    }
+                )
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
-                ) { result ->
-                    permissionsGranted = result.values.all { it }
-                    if (permissionsGranted) {
-                        engine.startDiscovery()
+                ) { _ ->
+                    // Check if essential connectivity permissions are granted (don't block on optional POST_NOTIFICATIONS)
+                    if (hasRequiredConnectivityPermissions(this@MainActivity)) {
+                        viewModel.startScanning()
                     }
                 }
 
                 LaunchedEffect(Unit) {
+                    if (hasRequiredConnectivityPermissions(this@MainActivity)) {
+                        viewModel.startScanning()
+                    }
                     val ungranted = permissionsToRequest.filter {
                         ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
                     }
                     if (ungranted.isNotEmpty()) {
                         permissionLauncher.launch(ungranted.toTypedArray())
-                    } else {
-                        permissionsGranted = true
-                        engine.startDiscovery()
                     }
-                }
-
-                val viewModel = remember {
-                    RadarViewModel(
-                        discoveryEngine = engine,
-                        transferManager = transfer
-                    )
                 }
 
                 Surface(
@@ -105,6 +107,21 @@ class MainActivity : ComponentActivity() {
                     RadarScreen(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    private fun hasRequiredConnectivityPermissions(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ (API 33+)
+            ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12 (API 31-32)
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else {
+            // Android 11 and below (API <= 30)
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         }
     }
 

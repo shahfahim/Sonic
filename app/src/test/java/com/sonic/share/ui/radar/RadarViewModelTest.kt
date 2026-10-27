@@ -95,9 +95,22 @@ class RadarViewModelTest {
     }
 
     @Test
+    fun testDefaultAutoScanningDisabled() = runBlocking {
+        val fakeDiscovery = FakeDiscoveryEngine()
+        val viewModel = RadarViewModel(fakeDiscovery, autoStartScanning = false)
+
+        assertFalse("Discovery should not start automatically when autoStartScanning is false", fakeDiscovery.isDiscoveryStarted)
+        assertFalse(viewModel.uiState.value.isScanning)
+
+        viewModel.startScanning()
+        assertTrue(fakeDiscovery.isDiscoveryStarted)
+        assertTrue(viewModel.uiState.value.isScanning)
+    }
+
+    @Test
     fun testToggleScanning() = runBlocking {
         val fakeDiscovery = FakeDiscoveryEngine()
-        val viewModel = RadarViewModel(fakeDiscovery)
+        val viewModel = RadarViewModel(fakeDiscovery, autoStartScanning = true)
 
         assertTrue(fakeDiscovery.isDiscoveryStarted)
         assertTrue(viewModel.uiState.value.isScanning)

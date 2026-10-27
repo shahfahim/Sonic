@@ -127,17 +127,26 @@ class BleScannerManager(
 
         activeCallback = callback
         try {
-            scanner.startScan(filters, settings, callback)
+            // Using unfiltered hardware scan (null) avoids OEM chipset firmware bugs (e.g. Samsung/MediaTek dropping packets).
+            // handleScanResult guarantees strict software filtering matching SONIC_SERVICE_UUID and BleBeaconPayload.
+            scanner.startScan(null, settings, callback)
             isScanning = true
-            safeLogD(TAG, "BLE scanning started successfully")
+            safeLogD(TAG, "BLE scanning started successfully (unfiltered hardware scan, software-filtered)")
         } catch (e: SecurityException) {
             safeLogE(TAG, "Missing BLUETOOTH_SCAN permission", e)
             isScanning = false
             onError?.invoke(ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED)
         } catch (e: Throwable) {
-            safeLogE(TAG, "Failed to start BLE scan", e)
-            isScanning = false
-            onError?.invoke(ScanCallback.SCAN_FAILED_INTERNAL_ERROR)
+            // Fallback for custom ROMs that might reject null filter
+            try {
+                scanner.startScan(emptyList(), settings, callback)
+                isScanning = true
+                safeLogD(TAG, "BLE scanning started with emptyList() fallback")
+            } catch (t: Throwable) {
+                safeLogE(TAG, "Failed to start BLE scan", t)
+                isScanning = false
+                onError?.invoke(ScanCallback.SCAN_FAILED_INTERNAL_ERROR)
+            }
         }
     }
 

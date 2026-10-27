@@ -51,6 +51,7 @@ class MdnsDiscoveryManager(
 
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private var multicastLock: android.net.wifi.WifiManager.MulticastLock? = null
 
     // Cache to map dynamic Nsd serviceName to actual peerId (handles Android mDNS name-conflict renaming)
     private val serviceNameToPeerId = ConcurrentHashMap<String, String>()
@@ -77,8 +78,9 @@ class MdnsDiscoveryManager(
             stopAdvertising()
         }
 
+        val cleanName = deviceName.filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == ' ' }.trim().take(32).ifBlank { "Sonic" }
         val serviceInfo = NsdServiceInfo().apply {
-            serviceName = "$deviceName-$deviceId"
+            serviceName = "$cleanName-$deviceId"
             serviceType = SERVICE_TYPE_BASE
             setPort(port)
             setAttribute("id", deviceId)
@@ -150,6 +152,20 @@ class MdnsDiscoveryManager(
             stopDiscovery()
         }
 
+        // Acquire Wi-Fi MulticastLock: Android drops mDNS multicasts (224.0.0.251) on physical hardware unless held
+        try {
+            val wifiManager = context?.applicationContext?.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            if (multicastLock == null) {
+                multicastLock = wifiManager?.createMulticastLock("sonic_mdns_lock")?.apply {
+                    setReferenceCounted(true)
+                }
+            }
+            multicastLock?.acquire()
+            safeLogD(TAG, "MulticastLock acquired for mDNS discovery")
+        } catch (e: Throwable) {
+            safeLogW(TAG, "Failed to acquire MulticastLock", e)
+        }
+
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {
                 safeLogD(TAG, "mDNS discovery started for type $regType")
@@ -159,7 +175,7 @@ class MdnsDiscoveryManager(
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 safeLogD(TAG, "mDNS service found: ${serviceInfo.serviceName}, type=${serviceInfo.serviceType}")
                 val sType = serviceInfo.serviceType ?: ""
-                if (sType.contains(SERVICE_TYPE_BASE)) {
+                if (sType.contains(SERVICE_TYPE_BASE) || sType.isEmpty()) {
                     enqueueResolve(serviceInfo, onPeerDiscovered)
                 }
             }
@@ -192,7 +208,7 @@ class MdnsDiscoveryManager(
 
         discoveryListener = listener
         try {
-            nsd.discoverServices(SERVICE_TYPE_BASE, NsdManager.PROTOCOL_DNS_SD, listener)
+            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Throwable) {
             safeLogE(TAG, "Failed to start mDNS service discovery", e)
             isDiscovering = false
@@ -201,6 +217,15 @@ class MdnsDiscoveryManager(
     }
 
     override fun stopDiscovery() {
+        try {
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+                safeLogD(TAG, "MulticastLock released")
+            }
+        } catch (e: Throwable) {
+            safeLogW(TAG, "Failed to release MulticastLock", e)
+        }
+
         val listener = discoveryListener
         val nsd = nsdManager
         if (listener != null && nsd != null) {

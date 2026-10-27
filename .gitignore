@@ -10,3 +10,4 @@
 app/build
 .agents/
 .superpowers/
+*.apk

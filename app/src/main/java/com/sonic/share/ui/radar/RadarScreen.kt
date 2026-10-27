@@ -109,6 +109,7 @@ fun RadarScreen(
             RadarTopBar(
                 isScanning = uiState.isScanning,
                 peerCount = uiState.discoveredPeers.size,
+                localDeviceName = uiState.localDeviceName,
                 onToggleScanning = { viewModel.toggleScanning() }
             )
         },
@@ -128,6 +129,7 @@ fun RadarScreen(
             // 2. Polar Device Layout Area
             PolarRadarLayout(
                 peers = uiState.discoveredPeers,
+                localDeviceName = uiState.localDeviceName,
                 onPeerClick = { peer ->
                     viewModel.selectPeer(peer)
                     targetPeerForTransfer = peer
@@ -166,6 +168,7 @@ fun RadarScreen(
 private fun RadarTopBar(
     isScanning: Boolean,
     peerCount: Int,
+    localDeviceName: String,
     onToggleScanning: () -> Unit
 ) {
     TopAppBar(
@@ -211,7 +214,7 @@ private fun RadarTopBar(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = if (isScanning) {
-                                if (peerCount > 0) "$peerCount nearby" else "Scanning nearby..."
+                                if (peerCount > 0) "$peerCount nearby" else "Visible as $localDeviceName • Searching..."
                             } else "Radar paused",
                             style = MaterialTheme.typography.bodySmall.copy(
                                 fontSize = 11.sp,
@@ -245,6 +248,7 @@ private fun RadarTopBar(
 @Composable
 private fun PolarRadarLayout(
     peers: List<PeerDevice>,
+    localDeviceName: String,
     onPeerClick: (PeerDevice) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -262,7 +266,7 @@ private fun PolarRadarLayout(
             modifier = Modifier.align(Alignment.Center),
             contentAlignment = Alignment.Center
         ) {
-            LocalDeviceNode()
+            LocalDeviceNode(localDeviceName = localDeviceName)
         }
 
         // Empty state hint
@@ -312,7 +316,7 @@ private fun PolarRadarLayout(
 }
 
 @Composable
-private fun LocalDeviceNode() {
+private fun LocalDeviceNode(localDeviceName: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
@@ -347,7 +351,7 @@ private fun LocalDeviceNode() {
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "This Device",
+            text = localDeviceName.ifBlank { "This Device" },
             style = MaterialTheme.typography.labelMedium.copy(
                 fontWeight = FontWeight.Bold,
                 fontSize = 12.sp,

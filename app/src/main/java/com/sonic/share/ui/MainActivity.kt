@@ -42,10 +42,30 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val bluetoothAdapter = try {
+            val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            bm?.adapter ?: android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+        } catch (_: Throwable) {
+            null
+        }
+
+        val deviceName = try {
+            val btName = bluetoothAdapter?.name
+            if (!btName.isNullOrBlank()) btName else "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+        } catch (_: Throwable) {
+            "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+        }
+
         // Initialize core engines
         val engine = DefaultDiscoveryEngine.create(applicationContext)
-        val transfer = TransferManager(context = applicationContext)
-        transfer.startServer()
+        val transfer = TransferManager(
+            context = applicationContext,
+            localDeviceId = engine.deviceId,
+            localDeviceName = deviceName,
+            localDeviceModel = Build.MODEL,
+            localPort = 8989
+        )
+        transfer.startServer(8989)
 
         discoveryEngine = engine
         transferManager = transfer
@@ -73,30 +93,39 @@ class MainActivity : ComponentActivity() {
                             return RadarViewModel(
                                 discoveryEngine = engine,
                                 transferManager = transfer,
-                                autoStartScanning = false
+                                autoStartScanning = false,
+                                deviceName = deviceName,
+                                localPort = 8989
                             ) as T
                         }
                     }
                 )
+
+                val enableBluetoothLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult()
+                ) {
+                    if (hasRequiredConnectivityPermissions(this@MainActivity)) {
+                        viewModel.startScanning()
+                    }
+                }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
                 ) { _ ->
                     // Check if essential connectivity permissions are granted (don't block on optional POST_NOTIFICATIONS)
                     if (hasRequiredConnectivityPermissions(this@MainActivity)) {
-                        viewModel.startScanning()
+                        checkBluetoothAndStart(bluetoothAdapter, enableBluetoothLauncher, viewModel)
                     }
                 }
 
                 LaunchedEffect(Unit) {
-                    if (hasRequiredConnectivityPermissions(this@MainActivity)) {
-                        viewModel.startScanning()
-                    }
                     val ungranted = permissionsToRequest.filter {
                         ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
                     }
                     if (ungranted.isNotEmpty()) {
                         permissionLauncher.launch(ungranted.toTypedArray())
+                    } else if (hasRequiredConnectivityPermissions(this@MainActivity)) {
+                        checkBluetoothAndStart(bluetoothAdapter, enableBluetoothLauncher, viewModel)
                     }
                 }
 
@@ -107,6 +136,27 @@ class MainActivity : ComponentActivity() {
                     RadarScreen(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    private fun checkBluetoothAndStart(
+        adapter: android.bluetooth.BluetoothAdapter?,
+        enableLauncher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>,
+        viewModel: RadarViewModel
+    ) {
+        val isBtEnabled = try {
+            adapter?.isEnabled == true
+        } catch (_: SecurityException) {
+            true
+        }
+        if (adapter != null && !isBtEnabled) {
+            try {
+                enableLauncher.launch(android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            } catch (_: Throwable) {
+                viewModel.startScanning()
+            }
+        } else {
+            viewModel.startScanning()
         }
     }
 
@@ -128,6 +178,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         discoveryEngine?.stopDiscovery()
+        discoveryEngine?.stopAdvertising()
         transferManager?.stopServer()
     }
 }

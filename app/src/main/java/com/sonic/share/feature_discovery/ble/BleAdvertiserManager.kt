@@ -171,6 +171,13 @@ class BleAdvertiserManager(
             }
 
             override fun onStartFailure(errorCode: Int) {
+                if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE) {
+                    safeLogW(TAG, "BLE advertisement data too large, retrying without scan response")
+                    try {
+                        advertiser.startAdvertising(settings, advertiseData, this)
+                        return
+                    } catch (_: Throwable) { }
+                }
                 safeLogE(TAG, "BLE advertisement failed with code: $errorCode")
                 isAdvertising = false
                 onError?.invoke(errorCode)
@@ -185,9 +192,14 @@ class BleAdvertiserManager(
             isAdvertising = false
             onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
         } catch (e: Throwable) {
-            safeLogE(TAG, "Failed to start BLE advertising", e)
-            isAdvertising = false
-            onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
+            // Fallback retry without scan response on legacy Bluetooth stacks
+            try {
+                advertiser.startAdvertising(settings, advertiseData, callback)
+            } catch (t: Throwable) {
+                safeLogE(TAG, "Failed to start BLE advertising", t)
+                isAdvertising = false
+                onError?.invoke(AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR)
+            }
         }
     }
 

@@ -24,7 +24,8 @@ data class RadarUiState(
     val selectedPeer: PeerDevice? = null,
     val activeTransfer: TransferSession? = null,
     val incomingRequest: TransferSession? = null,
-    val isScanning: Boolean = true
+    val isScanning: Boolean = true,
+    val localDeviceName: String = "Sonic Device"
 )
 
 /**
@@ -34,10 +35,17 @@ data class RadarUiState(
 class RadarViewModel(
     val discoveryEngine: DiscoveryEngine,
     val transferManager: TransferManager? = null,
-    autoStartScanning: Boolean = false
+    autoStartScanning: Boolean = false,
+    val deviceName: String = "Sonic Device",
+    val localPort: Int = 8989
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(RadarUiState(isScanning = autoStartScanning))
+    private val _uiState = MutableStateFlow(
+        RadarUiState(
+            isScanning = autoStartScanning,
+            localDeviceName = deviceName
+        )
+    )
     val uiState: StateFlow<RadarUiState> = _uiState.asStateFlow()
 
     private var activeTransferJob: Job? = null
@@ -106,11 +114,13 @@ class RadarViewModel(
     fun startScanning() {
         _uiState.update { it.copy(isScanning = true) }
         discoveryEngine.startDiscovery()
+        discoveryEngine.startAdvertising(deviceName = deviceName, port = localPort)
     }
 
     fun stopScanning() {
         _uiState.update { it.copy(isScanning = false) }
         discoveryEngine.stopDiscovery()
+        discoveryEngine.stopAdvertising()
     }
 
     /**
@@ -178,6 +188,7 @@ class RadarViewModel(
     override fun onCleared() {
         super.onCleared()
         discoveryEngine.stopDiscovery()
+        discoveryEngine.stopAdvertising()
         activeTransferJob?.cancel()
         peerCollectorJob?.cancel()
         incomingSessionJob?.cancel()

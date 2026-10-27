@@ -100,10 +100,12 @@ class RadarViewModelTest {
         val viewModel = RadarViewModel(fakeDiscovery, autoStartScanning = false)
 
         assertFalse("Discovery should not start automatically when autoStartScanning is false", fakeDiscovery.isDiscoveryStarted)
+        assertFalse("Advertising should not start automatically when autoStartScanning is false", fakeDiscovery.isAdvertisingStarted)
         assertFalse(viewModel.uiState.value.isScanning)
 
         viewModel.startScanning()
         assertTrue(fakeDiscovery.isDiscoveryStarted)
+        assertTrue(fakeDiscovery.isAdvertisingStarted)
         assertTrue(viewModel.uiState.value.isScanning)
     }
 
@@ -113,14 +115,17 @@ class RadarViewModelTest {
         val viewModel = RadarViewModel(fakeDiscovery, autoStartScanning = true)
 
         assertTrue(fakeDiscovery.isDiscoveryStarted)
+        assertTrue(fakeDiscovery.isAdvertisingStarted)
         assertTrue(viewModel.uiState.value.isScanning)
 
         viewModel.toggleScanning()
         assertFalse(fakeDiscovery.isDiscoveryStarted)
+        assertFalse(fakeDiscovery.isAdvertisingStarted)
         assertFalse(viewModel.uiState.value.isScanning)
 
         viewModel.toggleScanning()
         assertTrue(fakeDiscovery.isDiscoveryStarted)
+        assertTrue(fakeDiscovery.isAdvertisingStarted)
         assertTrue(viewModel.uiState.value.isScanning)
     }
 
